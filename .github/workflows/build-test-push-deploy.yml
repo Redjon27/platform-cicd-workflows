@@ -33,6 +33,10 @@ on:
       GITOPS_TOKEN:
         required: true
 
+concurrency:
+  group: reusable-${{ github.repository }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -48,9 +52,11 @@ jobs:
         run: echo "short_sha=${GITHUB_SHA:0:8}" >> $GITHUB_OUTPUT
 
       - name: Build image
+        shell: bash
         run: docker build -t "${{ inputs.image_name }}:ci" .
 
       - name: Save image artifact
+        shell: bash
         run: docker save "${{ inputs.image_name }}:ci" | gzip > image-ci.tar.gz
 
       - name: Upload image artifact
@@ -80,6 +86,7 @@ jobs:
           name: docker-image-ci
 
       - name: Load image
+        shell: bash
         run: gunzip -c image-ci.tar.gz | docker load
 
       - name: Smoke test (docker compose, JSON only)
@@ -110,21 +117,27 @@ jobs:
 
       - name: Logs on failure
         if: failure()
+        shell: bash
         run: |
           docker compose ps
           docker compose logs --no-color
 
       - name: Cleanup
         if: always()
+        shell: bash
         run: docker compose down -v
 
-  push_and_bump_dev:
+  push_and_pr_dev:
     runs-on: ubuntu-latest
     needs: [build, smoke_test]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    outputs:
+      pr_url: ${{ steps.create_pr.outputs.pr_url }}
+      pr_number: ${{ steps.create_pr.outputs.pr_number }}
     steps:
-      - name: Install jq
-        run: sudo apt-get update && sudo apt-get install -y jq
+      - name: Install tools
+        shell: bash
+        run: sudo apt-get update && sudo apt-get install -y jq yq
 
       - name: Download image artifact
         uses: actions/download-artifact@v4
@@ -132,6 +145,7 @@ jobs:
           name: docker-image-ci
 
       - name: Load image
+        shell: bash
         run: gunzip -c image-ci.tar.gz | docker load
 
       - name: Login & Push to JFrog
@@ -146,7 +160,7 @@ jobs:
           docker push "$FULL_TAG"
           echo "Pushed $FULL_TAG"
 
-      - name: Checkout GitOps repo
+      - name: Checkout GitOps repo (repo #4)
         uses: actions/checkout@v4
         with:
           repository: ${{ inputs.gitops_repo }}
@@ -155,21 +169,25 @@ jobs:
           path: gitops
           fetch-depth: 0
 
-      - name: Bump DEV tag in GitOps values
+      - name: Bump DEV image tag in GitOps values (nested key)
         shell: bash
+        env:
+          SHORT_SHA: ${{ needs.build.outputs.short_sha }}
         run: |
           set -euo pipefail
-          SHORT_SHA="${{ needs.build.outputs.short_sha }}"
           DEV_FILE="gitops/${{ inputs.gitops_values_dev_path }}"
-
           [[ -f "$DEV_FILE" ]] || { echo "Missing: $DEV_FILE"; exit 1; }
-          grep -qE '^[[:space:]]*tag:[[:space:]]*' "$DEV_FILE" \
-            || { echo "No tag: found in $DEV_FILE"; exit 1; }
 
-          sed -i -E "s|^([[:space:]]*tag:[[:space:]]*).*$|\1\"docker-${SHORT_SHA}\"|g" "$DEV_FILE"
+          # Update only the nested key (wrapper dependency values)
+          yq -i '.devops-tech-challenge.app.image.tag = "docker-" + strenv(SHORT_SHA)' "$DEV_FILE"
+
+          # Sanity check
+          yq -e '.devops-tech-challenge.app.image.tag == ("docker-" + strenv(SHORT_SHA))' "$DEV_FILE" >/dev/null
+
           git -C gitops diff -- .
 
       - name: Create PR in GitOps repo (dev only)
+        id: create_pr
         shell: bash
         run: |
           set -euo pipefail
@@ -182,18 +200,74 @@ jobs:
 
           git checkout -b "$BRANCH"
           git add "${{ inputs.gitops_values_dev_path }}"
-          git commit -m "chore(dev): bump image tag to docker-${SHORT_SHA}" || exit 0
-          git push origin "$BRANCH"
+
+          if git diff --cached --quiet; then
+            echo "No changes detected. Skipping PR."
+            echo "pr_url=" >> $GITHUB_OUTPUT
+            echo "pr_number=" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          git commit -m "chore(deploy): bump dev image tag to docker-${SHORT_SHA}"
+          git push -u origin "$BRANCH"
 
           api_url="https://api.github.com/repos/${{ inputs.gitops_repo }}/pulls"
-          title="chore(dev): bump image tag to docker-${SHORT_SHA}"
-          body="Auto-generated PR after pushing image docker-${SHORT_SHA} (dev promotion only)."
+          payload=$(jq -n \
+            --arg title "chore(dev): bump image tag to docker-${SHORT_SHA}" \
+            --arg head "$BRANCH" \
+            --arg base "main" \
+            --arg body "Auto-generated PR after pushing image docker-${SHORT_SHA}. (Dev auto-promotion only)" \
+            '{title:$title, head:$head, base:$base, body:$body}')
 
-          payload=$(jq -n --arg t "$title" --arg h "$BRANCH" --arg b "main" --arg d "$body" \
-            '{title:$t, head:$h, base:$b, body:$d}')
-
-          curl -sSf -X POST \
-            -H "Authorization: token ${{ secrets.GITOPS_TOKEN }}" \
+          resp=$(curl -sS -X POST \
+            -H "Authorization: Bearer ${{ secrets.GITOPS_TOKEN }}" \
             -H "Accept: application/vnd.github+json" \
             "$api_url" \
-            -d "$payload" | jq -r '.html_url'
+            -d "$payload" || true)
+
+          pr_url=$(echo "$resp" | jq -r '.html_url // empty')
+          pr_number=$(echo "$resp" | jq -r '.number // empty')
+
+          if [[ -n "$pr_url" && -n "$pr_number" ]]; then
+            echo "PR created: $pr_url"
+            echo "pr_url=$pr_url" >> $GITHUB_OUTPUT
+            echo "pr_number=$pr_number" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          echo "PR not created. Response:"
+          echo "$resp" | jq -r '.' || echo "$resp"
+          exit 1
+
+  auto_approve_and_merge:
+    runs-on: ubuntu-latest
+    needs: push_and_pr_dev
+    if: ${{ needs.push_and_pr_dev.outputs.pr_number != '' }}
+    steps:
+      - name: Approve PR
+        shell: bash
+        run: |
+          set -euo pipefail
+          PR_NUMBER="${{ needs.push_and_pr_dev.outputs.pr_number }}"
+
+          curl -sSf -X POST \
+            -H "Authorization: Bearer ${{ secrets.GITOPS_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ inputs.gitops_repo }}/pulls/${PR_NUMBER}/reviews" \
+            -d '{"event":"APPROVE","body":"Auto-approve: dev promotion"}' >/dev/null
+
+          echo "Approved PR #${PR_NUMBER}"
+
+      - name: Merge PR (squash)
+        shell: bash
+        run: |
+          set -euo pipefail
+          PR_NUMBER="${{ needs.push_and_pr_dev.outputs.pr_number }}"
+
+          curl -sSf -X PUT \
+            -H "Authorization: Bearer ${{ secrets.GITOPS_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ inputs.gitops_repo }}/pulls/${PR_NUMBER}/merge" \
+            -d '{"merge_method":"squash","commit_title":"chore(dev): auto-merge image bump"}' >/dev/null
+
+          echo "Merged PR #${PR_NUMBER}"
