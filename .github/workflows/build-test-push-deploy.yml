@@ -189,10 +189,10 @@ jobs:
 
           # Update only the nested key (wrapper dependency values)
           # Key has '-' so we use bracket notation:
-          yq -y -i '.["devops-tech-challenge"].app.image.tag = "docker-" + strenv(SHORT_SHA)' "$DEV_FILE"
+          yq e -i '.["devops-tech-challenge"].app.image.tag = "docker-" + strenv(SHORT_SHA)' "$DEV_FILE"
 
           # Sanity check
-          yq -e '.["devops-tech-challenge"].app.image.tag == ("docker-" + strenv(SHORT_SHA))' "$DEV_FILE" >/dev/null
+          yq e -e '.["devops-tech-challenge"].app.image.tag == ("docker-" + strenv(SHORT_SHA))' "$DEV_FILE" >/dev/null
 
           git -C gitops diff -- .
 
