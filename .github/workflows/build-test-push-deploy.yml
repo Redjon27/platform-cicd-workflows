@@ -169,22 +169,22 @@ jobs:
           path: gitops
           fetch-depth: 0
 
-      - name: Bump DEV image tag in GitOps values (nested key)
+      - name: Bump DEV image tag in GitOps values
         shell: bash
         env:
           SHORT_SHA: ${{ needs.build.outputs.short_sha }}
         run: |
-          set -euo pipefail
-          DEV_FILE="gitops/${{ inputs.gitops_values_dev_path }}"
-          [[ -f "$DEV_FILE" ]] || { echo "Missing: $DEV_FILE"; exit 1; }
-
-          # Update only the nested key (wrapper dependency values)
-          yq -i '.devops-tech-challenge.app.image.tag = "docker-" + strenv(SHORT_SHA)' "$DEV_FILE"
-
-          # Sanity check
-          yq -e '.devops-tech-challenge.app.image.tag == ("docker-" + strenv(SHORT_SHA))' "$DEV_FILE" >/dev/null
-
-          git -C gitops diff -- .
+            set -euo pipefail
+            DEV_FILE="gitops/${{ inputs.gitops_values_dev_path }}"
+            [[ -f "$DEV_FILE" ]] || { echo "Missing: $DEV_FILE"; exit 1; }
+  
+            # Update only the nested key (wrapper dependency values)
+            yq -y -i '.devops-tech-challenge.app.image.tag = "docker-" + strenv(SHORT_SHA)' "$DEV_FILE"
+  
+            # Sanity check
+            yq -e '.devops-tech-challenge.app.image.tag == ("docker-" + strenv(SHORT_SHA))' "$DEV_FILE" >/dev/null
+  
+            git -C gitops diff -- .
 
       - name: Create PR in GitOps repo (dev only)
         id: create_pr
