@@ -208,6 +208,9 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
+          # Force origin to use PAT (GITOPS_TOKEN)
+          git remote set-url origin "https://x-access-token:${{ secrets.GITOPS_TOKEN }}@github.com/${{ inputs.gitops_repo }}.git"
+
           git checkout -b "$BRANCH"
           git add "${{ inputs.gitops_values_dev_path }}"
 
