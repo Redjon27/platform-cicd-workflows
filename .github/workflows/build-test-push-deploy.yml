@@ -252,35 +252,30 @@ jobs:
           echo "$resp" | jq -r '.' || echo "$resp"
           exit 1
 
-  auto_approve_and_merge:
+  auto_merge:
     runs-on: ubuntu-latest
     needs: push_and_pr_dev
     if: ${{ needs.push_and_pr_dev.outputs.pr_number != '' }}
     steps:
-      - name: Approve PR
-        shell: bash
-        run: |
-          set -euo pipefail
-          PR_NUMBER="${{ needs.push_and_pr_dev.outputs.pr_number }}"
-
-          curl -sSf -X POST \
-            -H "Authorization: Bearer ${{ secrets.GITOPS_TOKEN }}" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${{ inputs.gitops_repo }}/pulls/${PR_NUMBER}/reviews" \
-            -d '{"event":"APPROVE","body":"Auto-approve: dev promotion"}' >/dev/null
-
-          echo "Approved PR #${PR_NUMBER}"
-
       - name: Merge PR (squash)
         shell: bash
         run: |
           set -euo pipefail
           PR_NUMBER="${{ needs.push_and_pr_dev.outputs.pr_number }}"
 
-          curl -sSf -X PUT \
+          resp=$(curl -sS -X PUT \
             -H "Authorization: Bearer ${{ secrets.GITOPS_TOKEN }}" \
             -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/${{ inputs.gitops_repo }}/pulls/${PR_NUMBER}/merge" \
-            -d '{"merge_method":"squash","commit_title":"chore(dev): auto-merge image bump"}' >/dev/null
+            -d '{"merge_method":"squash","commit_title":"chore(dev): auto-merge image bump"}' || true)
 
-          echo "Merged PR #${PR_NUMBER}"
+          merged=$(echo "$resp" | jq -r '.merged // empty')
+          if [[ "$merged" == "true" ]]; then
+            echo "Merged PR #${PR_NUMBER}"
+            exit 0
+          fi
+
+          echo "Merge failed. Response:"
+          echo "$resp" | jq -r '.' || echo "$resp"
+          exit 1
+
