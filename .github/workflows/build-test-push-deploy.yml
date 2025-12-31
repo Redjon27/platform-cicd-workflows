@@ -102,17 +102,22 @@ jobs:
             -f docker-compose.yml -f docker-compose.dev.yml -f docker-compose.ci.override.yml \
             up -d --no-build
 
-          echo "Waiting for app..."
+          echo "Waiting for app (/healthz)..."
           for i in {1..40}; do
-            if curl -sSf "http://localhost:${{ inputs.app_port }}/" >/dev/null; then
-              echo "App responding."
+            if curl -sSf "http://localhost:${{ inputs.app_port }}/healthz" >/dev/null; then
+              echo "App responding on /healthz."
               break
             fi
             sleep 3
           done
 
-          curl -sSf "http://localhost:${{ inputs.app_port }}/" -o /tmp/resp.json
+          # Fail hard if still not ready + validate JSON
+          curl -sSf "http://localhost:${{ inputs.app_port }}/healthz" -o /tmp/resp.json
           python -m json.tool /tmp/resp.json >/dev/null
+
+          # Also ensure metrics endpoint is up
+          curl -sSf "http://localhost:${{ inputs.app_port }}/metrics" >/dev/null
+
           echo "Smoke test OK"
 
       - name: Logs on failure
@@ -278,4 +283,3 @@ jobs:
           echo "Merge failed. Response:"
           echo "$resp" | jq -r '.' || echo "$resp"
           exit 1
-
